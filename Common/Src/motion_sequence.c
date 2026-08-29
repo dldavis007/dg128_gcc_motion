@@ -2,7 +2,7 @@
 #include "debug_visibility.h"
 
 /* Motion profile used by both the PC simulation and the embedded target. */
-#define OUTWARD_TARGET_COUNTS 49l  /* Proximity rising edges from retracted. */
+#define OUTWARD_TARGET_COUNTS 98l  /* Qualified rising and falling edges. */
 #define TEST_CYCLES 2u            /* One cycle is extend, pause and retract. */
 #define MAX_DUTY_PERCENT 95       /* Absolute PWM command ceiling. */
 #define MIN_DUTY_PERCENT 10       /* Minimum useful command while moving. */
@@ -24,11 +24,11 @@
  * gains determine the duty normally requested below that ceiling.
  */
 #define POSITION_KP_X100 250      /* 2.50 count/s per count of error. */
-#define MAX_SPEED_X100 300        /* Maximum command is 3.00 counts/s. */
-#define DUTY_FEEDFORWARD_GAIN 1667 /* 3.00 count/s produces about 50% duty. */
-#define SPEED_KP_GAIN 10          /* Tested proportional duty correction. */
-#define SPEED_KI_STEP_GAIN 10     /* Tested integral correction per update. */
-#define INTEGRAL_LIMIT_X100 2500  /* Limit integral contribution to +/-25%. */
+#define MAX_SPEED_X100 600        /* 6.00 both-edge counts/s = prior 3.00. */
+#define DUTY_FEEDFORWARD_GAIN 833 /* 6.00 counts/s produces about 50% duty. */
+#define SPEED_KP_GAIN 5           /* Stable bench proportional correction. */
+#define SPEED_KI_STEP_GAIN 2      /* Stable bench integral correction/update. */
+#define INTEGRAL_LIMIT_X100 1500  /* Limit integral contribution to +/-15%. */
 
 /*
  * ControllerReset
@@ -60,6 +60,7 @@ FILE_LOCAL signed char ControllerStep(MOTION_SEQUENCE *sequence,
     signed long speed_command;
     signed long duty_x100;
     signed long integral;
+    signed long gain_error_x100;
     signed char direction;
 
     /* Retain a signed 16-bit diagnostic copy without allowing overflow. */
@@ -83,10 +84,16 @@ FILE_LOCAL signed char ControllerStep(MOTION_SEQUENCE *sequence,
     sequence->speed_error_x100 =
         (signed int)(sequence->speed_command_x100 - measured_speed_x100);
 
+    /*
+     * Both-edge feedback doubles the numerical speed units. Convert error to
+     * the former rising-edge-equivalent scale before applying the established
+     * 5/2 PI gains, preserving their physical response.
+     */
+    gain_error_x100 = (signed long)sequence->speed_error_x100 / 2l;
+
     /* Inner speed PI loop.  Integral limiting provides basic anti-windup. */
     integral = sequence->speed_integral_x100;
-    integral += ((signed long)sequence->speed_error_x100 *
-                 SPEED_KI_STEP_GAIN) / 100l;
+    integral += (gain_error_x100 * SPEED_KI_STEP_GAIN) / 100l;
     if (integral > INTEGRAL_LIMIT_X100) {
         integral = INTEGRAL_LIMIT_X100;
     } else if (integral < -INTEGRAL_LIMIT_X100) {
@@ -96,7 +103,7 @@ FILE_LOCAL signed char ControllerStep(MOTION_SEQUENCE *sequence,
 
     /* Feed-forward supplies nominal motor drive; PI corrects speed error. */
     duty_x100 = ((speed_command * DUTY_FEEDFORWARD_GAIN) / 100l) +
-                ((signed long)sequence->speed_error_x100 * SPEED_KP_GAIN) +
+                (gain_error_x100 * SPEED_KP_GAIN) +
                 integral;
 
     /* Apply minimum useful drive and the absolute PWM ceiling by direction. */

@@ -113,8 +113,10 @@ void CoatingSettings_Default(COATING_SETTINGS *settings)
     settings->short_slow_speed_percent = 40u;
     settings->long_fast_speed_percent = 90u;
     settings->long_slow_speed_percent = 60u;
-    settings->feedback_counts_per_inch_x100 = 485u;
-    settings->motor_max_speed_counts_x100 = 625u;
+    /* Both qualified edges double the former 4.85-count/in calibration. */
+    settings->feedback_counts_per_inch_x100 = 970u;
+    /* Both-edge equivalent of 6.25 rising-edge counts/second at full speed. */
+    settings->motor_max_speed_counts_x100 = 1250u;
 }
 
 void CoatingSettings_Validate(COATING_SETTINGS *settings)
