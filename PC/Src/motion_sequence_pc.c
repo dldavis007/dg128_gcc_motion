@@ -2,7 +2,7 @@
 #include "motion_sequence.h"
 #include "motion_csv.h"
 
-#define PULSES_PER_REV 9.0
+#define PROX_EDGES_PER_REV 18.0
 #define MOTOR_MAX_RPM 40.0
 #define SIM_STEP_MS 1ul
 #define MOTOR_TIME_CONSTANT_MS 180.0
@@ -11,7 +11,7 @@
 /*
  * main
  * Run the portable controller against a deterministic first-order motor model.
- * The model converts signed duty to shaft speed and nine prox pulses/revolution,
+ * The model converts signed duty to shaft speed and 18 prox edges/revolution,
  * calls the same 10 ms MotionSequence_Step used by the DG128, writes 250 ms CSV
  * samples, and returns nonzero if the simulated sequence faults or times out.
  */
@@ -55,7 +55,8 @@ int main(void)
     previous_state = sequence.state;
     fputs(MotionCsv_Header(), csv_file);
 
-    printf("PC cascaded position/speed control: 49 counts, 2 cycles, 95%% maximum\n");
+    printf("PC cascaded position/speed control: 98 both-edge counts, "
+           "2 cycles, 95%% maximum\n");
 
     while ((sequence.state != MOTION_COMPLETE) &&
            (sequence.state != MOTION_FAULT) &&
@@ -110,7 +111,7 @@ int main(void)
         demanded_rpm = ((double)sequence.duty_command / 100.0) * MOTOR_MAX_RPM;
         actual_rpm += (demanded_rpm - actual_rpm) *
                       ((double)SIM_STEP_MS / MOTOR_TIME_CONSTANT_MS);
-        pulse_accumulator += (actual_rpm / 60.0) * PULSES_PER_REV *
+        pulse_accumulator += (actual_rpm / 60.0) * PROX_EDGES_PER_REV *
                              ((double)SIM_STEP_MS / 1000.0);
         while (pulse_accumulator >= 1.0) {
             ++position;

@@ -3,7 +3,7 @@
 #include "motion_sequence.h"
 #include "coating_cycle.h"
 
-#define PULSES_PER_REV 9.0
+#define PROX_EDGES_PER_REV 18.0
 #define MOTOR_MAX_RPM 40.0
 #define SIM_STEP_MS 1ul
 #define MOTOR_TIME_CONSTANT_MS 180.0
@@ -210,7 +210,7 @@ int main(int argc, char **argv)
 
         actual_rpm += (demanded_rpm - actual_rpm) *
                       ((double)SIM_STEP_MS / MOTOR_TIME_CONSTANT_MS);
-        pulse_accumulator += (actual_rpm / 60.0) * PULSES_PER_REV *
+        pulse_accumulator += (actual_rpm / 60.0) * PROX_EDGES_PER_REV *
                              ((double)SIM_STEP_MS / 1000.0);
         while (pulse_accumulator >= 1.0) {
             ++position;
