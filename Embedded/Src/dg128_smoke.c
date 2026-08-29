@@ -12,6 +12,9 @@
 #define PROX_INPUT_MASK 0x10u
 #define PROX_QUALIFY_SAMPLES 2u
 #define PROX_STOP_TIMEOUT_MS 3000ul
+#define PROX_FRACTION_SCALE 1000u
+#define PROX_FRACTION_MIN 100u
+#define PROX_FRACTION_MAX 900u
 #define MOTOR_ENABLE_COMMAND_MASK 0x02u
 #define MOTOR_ENABLE_FEEDBACK_MASK 0x08u
 #define MOTOR_ARM_VALUE 0xA5u
@@ -26,12 +29,21 @@ volatile unsigned long Tick1msCount;
 volatile unsigned long Tick10msCount;
 volatile unsigned long MainLoopCount;
 volatile unsigned long ProxEdgeCount;
+volatile unsigned long ProxLastEdgeMs;
 volatile unsigned long ProxLastRiseMs;
 volatile unsigned long ProxPeriodMs;
+volatile unsigned long ProxLastIntervalMs;
+volatile unsigned long ProxHighTimeMs;
+volatile unsigned long ProxLowTimeMs;
 volatile unsigned char ProxPeriodValid;
+volatile unsigned char ProxLastIntervalWasHigh;
 volatile unsigned char ProxInputRaw;
 volatile unsigned char ProxInputStable;
 volatile unsigned char ProxStopped;
+volatile unsigned int ProxHighFractionExtendX1000 = 500u;
+volatile unsigned int ProxHighFractionRetractX1000 = 500u;
+volatile unsigned char ProxHighFractionExtendValid;
+volatile unsigned char ProxHighFractionRetractValid;
 volatile unsigned char StartupPassed;
 volatile unsigned char MotorOutputsEnabled;
 volatile unsigned char MotorEnableFeedback;
@@ -66,8 +78,8 @@ volatile unsigned char CoatShortFastSpeedPercent = 70u;
 volatile unsigned char CoatShortSlowSpeedPercent = 40u;
 volatile unsigned char CoatLongFastSpeedPercent = 90u;
 volatile unsigned char CoatLongSlowSpeedPercent = 60u;
-volatile unsigned int CoatFeedbackCountsPerInchX100 = 485u;
-volatile unsigned int CoatMotorMaxSpeedCountsX100 = 625u;
+volatile unsigned int CoatFeedbackCountsPerInchX100 = 970u; /* Both edges. */
+volatile unsigned int CoatMotorMaxSpeedCountsX100 = 1250u; /* Both edges/s. */
 volatile unsigned long CoatSimHomeDelayMs = COATING_DEFAULT_HOME_DELAY_MS;
 
 /* Simulated CAN command/status process image and coating diagnostics. */
@@ -87,6 +99,11 @@ volatile unsigned char CoatAutomaticActive;
 
 FILE_LOCAL unsigned long ProxPreviousRiseMs;
 FILE_LOCAL unsigned char ProxFirstRising = 1u;
+FILE_LOCAL unsigned char ProxEdgeTimingValid;
+FILE_LOCAL volatile unsigned char ProxCyclePending;
+FILE_LOCAL volatile signed char ProxPendingDirection;
+FILE_LOCAL volatile unsigned long ProxPendingPeriodMs;
+FILE_LOCAL volatile unsigned long ProxPendingHighTimeMs;
 FILE_LOCAL unsigned char ProxCandidateState;
 FILE_LOCAL unsigned char ProxQualifyCount;
 FILE_LOCAL unsigned char Tick10msDivider;
@@ -109,12 +126,116 @@ FILE_LOCAL unsigned long CoatingNextCommandMs;
 FILE_LOCAL unsigned long CoatingLastControlTick;
 FILE_LOCAL char CoatingTelemetryLine[160];
 
-/* Require two fresh rising edges before speed feedback is valid for a move. */
+/* Require one fresh complete tooth cycle before speed is valid for a move. */
 FILE_LOCAL void prox_speed_invalidate(void)
 {
     ProxPeriodValid = 0u;
     ProxStopped = 1u;
     ProxFirstRising = 1u;
+    ProxEdgeTimingValid = 0u;
+    ProxCyclePending = 0u;
+    ProxLastIntervalMs = 0ul;
+}
+
+/*
+ * Learn the high-time fraction for the active direction. A complete
+ * rising-to-rising period is the geometry-independent reference. The first
+ * valid sample initializes that direction; later samples use a 1/4 IIR update
+ * to suppress tooth-to-tooth and 1 ms sampling variation.
+ */
+FILE_LOCAL void prox_learn_high_fraction(unsigned long period_ms,
+                                         unsigned long high_time_ms,
+                                         signed char direction)
+{
+    unsigned int sample;
+    unsigned int learned;
+
+    if ((direction == 0) || (period_ms == 0ul) ||
+        (high_time_ms == 0ul) || (high_time_ms >= period_ms)) {
+        return;
+    }
+    sample = (unsigned int)((high_time_ms * PROX_FRACTION_SCALE +
+                             (period_ms / 2ul)) / period_ms);
+    if ((sample < PROX_FRACTION_MIN) || (sample > PROX_FRACTION_MAX)) {
+        return;
+    }
+
+    if (direction > 0) {
+        if (ProxHighFractionExtendValid == 0u) {
+            learned = sample;
+            ProxHighFractionExtendValid = 1u;
+        } else {
+            learned = (unsigned int)
+                ((ProxHighFractionExtendX1000 * 3u + sample + 2u) / 4u);
+        }
+        ProxHighFractionExtendX1000 = learned;
+    } else {
+        if (ProxHighFractionRetractValid == 0u) {
+            learned = sample;
+            ProxHighFractionRetractValid = 1u;
+        } else {
+            learned = (unsigned int)
+                ((ProxHighFractionRetractX1000 * 3u + sample + 2u) / 4u);
+        }
+        ProxHighFractionRetractX1000 = learned;
+    }
+}
+
+/*
+ * Perform the 32-bit divide outside the 1 ms ISR. The ISR publishes a complete
+ * timing sample atomically by setting ProxCyclePending after its fields.
+ */
+FILE_LOCAL void prox_process_pending_cycle(void)
+{
+    unsigned long period_ms;
+    unsigned long high_time_ms;
+    signed char direction;
+
+    if (ProxCyclePending == 0u) {
+        return;
+    }
+    period_ms = ProxPendingPeriodMs;
+    high_time_ms = ProxPendingHighTimeMs;
+    direction = ProxPendingDirection;
+    ProxCyclePending = 0u;
+    prox_learn_high_fraction(period_ms, high_time_ms, direction);
+
+    if ((direction == MotorActiveDirection) &&
+        (((direction > 0) && (ProxHighFractionExtendValid != 0u)) ||
+         ((direction < 0) && (ProxHighFractionRetractValid != 0u)))) {
+        ProxPeriodValid = 1u;
+    }
+}
+
+/*
+ * Return speed in qualified transitions/second x100. High and low intervals
+ * are normalized with the learned direction-specific duty fraction. Thus an
+ * asymmetric sensor waveform does not alternate between two apparent speeds.
+ */
+FILE_LOCAL signed int prox_measured_speed(void)
+{
+    unsigned int high_fraction;
+    unsigned int interval_fraction;
+    unsigned long speed;
+
+    prox_process_pending_cycle();
+    if ((ProxPeriodValid == 0u) || (ProxStopped != 0u) ||
+        (ProxLastIntervalMs == 0ul) || (MotorActiveDirection == 0)) {
+        return 0;
+    }
+    high_fraction = (MotorActiveDirection > 0) ?
+        ProxHighFractionExtendX1000 : ProxHighFractionRetractX1000;
+    interval_fraction = (ProxLastIntervalWasHigh != 0u) ?
+        high_fraction : (unsigned int)(PROX_FRACTION_SCALE - high_fraction);
+
+    /* 2 edges/cycle * 1000 ms/s * x100 * fraction/1000. */
+    speed = (200ul * interval_fraction + (ProxLastIntervalMs / 2ul)) /
+            ProxLastIntervalMs;
+    if (speed > 32767ul) {
+        speed = 32767ul;
+    }
+    return (MotorActiveDirection > 0) ?
+        (signed int)speed : (signed int)-(signed int)speed;
 }
 
 /*
@@ -188,29 +309,50 @@ void NEAR_FIXED timer_ch7_handler(void)
             ProxInputStable = raw_state;
             ProxQualifyCount = 0u;
 
-            /* Count and time rising edges only; duty-cycle asymmetry is ignored. */
-            if (raw_state != 0u) {
-                ++ProxEdgeCount;
-                if (MotorActiveDirection > 0) {
-                    ++MotionPositionCount;
-                } else if (MotorActiveDirection < 0) {
-                    --MotionPositionCount;
+            /* Every qualified transition contributes one position count. */
+            ++ProxEdgeCount;
+            if (MotorActiveDirection > 0) {
+                ++MotionPositionCount;
+            } else if (MotorActiveDirection < 0) {
+                --MotionPositionCount;
+            }
+            ProxStopped = 0u;
+
+            if (ProxEdgeTimingValid != 0u) {
+                ProxLastIntervalMs = now_ms - ProxLastEdgeMs;
+                /* New low means the interval that just ended was high. */
+                ProxLastIntervalWasHigh = (raw_state == 0u) ? 1u : 0u;
+                if (ProxLastIntervalWasHigh != 0u) {
+                    ProxHighTimeMs = ProxLastIntervalMs;
+                } else {
+                    ProxLowTimeMs = ProxLastIntervalMs;
                 }
+            } else {
+                ProxEdgeTimingValid = 1u;
+            }
+            ProxLastEdgeMs = now_ms;
+
+            /* Rising-to-rising time supplies the full-cycle reference. */
+            if (raw_state != 0u) {
                 ProxLastRiseMs = now_ms;
-                ProxStopped = 0u;
                 if (ProxFirstRising != 0u) {
                     ProxFirstRising = 0u;
                 } else {
                     ProxPeriodMs = now_ms - ProxPreviousRiseMs;
-                    ProxPeriodValid = 1u;
+                    if (MotorActiveDirection != 0) {
+                        ProxPendingPeriodMs = ProxPeriodMs;
+                        ProxPendingHighTimeMs = ProxHighTimeMs;
+                        ProxPendingDirection = MotorActiveDirection;
+                        ProxCyclePending = 1u;
+                    }
                 }
                 ProxPreviousRiseMs = now_ms;
             }
         }
     }
 
-    if ((ProxFirstRising == 0u) &&
-        ((now_ms - ProxPreviousRiseMs) > PROX_STOP_TIMEOUT_MS)) {
+    if ((ProxEdgeTimingValid != 0u) &&
+        ((now_ms - ProxLastEdgeMs) > PROX_STOP_TIMEOUT_MS)) {
         ProxStopped = 1u;
     }
 }
@@ -333,6 +475,8 @@ FILE_LOCAL void motor_test_service(void)
     }
 
     if (MotorOutputsEnabled == 0u) {
+        /* A fresh start or post-pause reversal needs a new complete cycle. */
+        prox_speed_invalidate();
         MotorTestStartMs = Tick1msCount;
         MotorTestElapsedMs = 0ul;
         MotorActiveDirection = direction;
@@ -406,17 +550,7 @@ FILE_LOCAL void motion_sequence_service(void)
     if ((MotionAutomaticActive != 0u) &&
         (Tick10msCount != MotionLastControlTick)) {
         MotionLastControlTick = Tick10msCount;
-        measured_speed_x100 = 0;
-        if ((ProxPeriodValid != 0u) && (ProxStopped == 0u) &&
-            (ProxPeriodMs != 0ul)) {
-            measured_speed_x100 =
-                (signed int)(100000ul / ProxPeriodMs);
-            if (MotorActiveDirection < 0) {
-                measured_speed_x100 = (signed int)-measured_speed_x100;
-            } else if (MotorActiveDirection == 0) {
-                measured_speed_x100 = 0;
-            }
-        }
+        measured_speed_x100 = prox_measured_speed();
         MotionSequence_Step(&MotionSequence, Tick1msCount,
                             MotionPositionCount, measured_speed_x100);
     }
@@ -474,19 +608,7 @@ FILE_LOCAL void motion_sequence_service(void)
 /* Return signed proximity speed in counts/second x100. */
 FILE_LOCAL signed int coating_measured_speed(void)
 {
-    signed int speed_x100;
-
-    speed_x100 = 0;
-    if ((ProxPeriodValid != 0u) && (ProxStopped == 0u) &&
-        (ProxPeriodMs != 0ul)) {
-        speed_x100 = (signed int)(100000ul / ProxPeriodMs);
-        if (MotorActiveDirection < 0) {
-            speed_x100 = (signed int)-speed_x100;
-        } else if (MotorActiveDirection == 0) {
-            speed_x100 = 0;
-        }
-    }
-    return speed_x100;
+    return prox_measured_speed();
 }
 
 /* Convert a CAN position byte in tenths of an inch to rounded prox counts. */
