@@ -9,27 +9,31 @@ interface.  The bench hardware completed two extend/retract cycles using a PP4
 GPIO proximity input and an L6203 motor driver, returning to position zero with
 no fault.  The PC version completed the equivalent test.
 
-The simulated-CAN coating application is now included in the embedded source
-and build. It has passed strict C89 host compilation/linkage and all PC coating
-scenarios, but has not yet been cross-linked or run on the physical DG128 after
-this expansion. Treat the HC12 size/map review and first bench run as required
-verification, not as an already completed hardware result.
+The simulated-CAN coating application has completed the short/long stroke
+pattern on the physical DG128 with zero motion fault and zero dropped records.
+The new both-edge/asymmetry-compensation revision passes strict C89 host linkage
+and all PC scenarios, but still requires its first HC12 build/map review and
+controlled bench run.
 
 Current tuning is:
 
 ```c
 POSITION_KP_X100          250
-SPEED_KP_GAIN              10
-SPEED_KI_STEP_GAIN         10
-INTEGRAL_LIMIT_X100      2500  /* PI integral contribution limited to +/-25% */
-MAX_SPEED_X100            300  /* 3.00 prox counts/second */
+SPEED_KP_GAIN               5
+SPEED_KI_STEP_GAIN          2
+INTEGRAL_LIMIT_X100      1500  /* PI integral contribution limited to +/-15% */
+MAX_SPEED_X100            600  /* Same physical speed as former 3.00 rising/s */
 REVERSAL_PAUSE_MS         100
 MOTION_TELEMETRY_PERIOD_MS 250
-OUTWARD_TARGET_COUNTS      49
+OUTWARD_TARGET_COUNTS      98
 TEST_CYCLES                 2
 MAX_DUTY_PERCENT           95
 MIN_DUTY_PERCENT           10
 ```
+
+Speed diagnostics use doubled both-edge units. The controller divides speed
+error by two before applying `SPEED_KP_GAIN` and `SPEED_KI_STEP_GAIN`, so the
+listed 5/2 values retain the original physical loop response.
 
 ## Architecture
 
@@ -94,7 +98,9 @@ controller does not know about PDOs or object dictionaries.
 - PA1 -> filtered L6203 ENABLE command.
 - PP3 -> ENABLE feedback input.
 - PP4 -> prox input, polled as GPIO every 1 ms.
-- Prox produces nine rising-edge counts per sprocket revolution.
+- Prox produces nine tooth cycles and 18 qualified edges per revolution.
+- Position counts both edges. Speed learns separate extend/retract high-time
+  fractions from full cycles and normalizes every high and low interval.
 - Direction is inferred from the commanded motor direction because this is a
   single-channel prox.  The final product is expected to use PA6 or PB6 GPIO.
 - No encoder capture ISR, vector, globals or PC encoder simulation remain in
@@ -179,9 +185,9 @@ a production homing implementation. Never run it on a mechanically connected
 actuator unless that actuator has first been placed at its retracted reference.
 A real unit requires a home switch or a separately validated homing method.
 
-After home, point moves use real PP4 edges, measured period, speed PI and the
-guarded L6203 output. Each move invalidates the old prox period and requires two
-fresh rising edges before using speed feedback. The legacy and coating tests
+After home, point moves use real PP4 edges, compensated speed PI and the
+guarded L6203 output. Each move invalidates old timing and requires one fresh
+complete rising-to-rising cycle before using speed feedback. The legacy and coating tests
 are mutually exclusive. Setting `CoatingTestArm=0` aborts the coating test.
 
 Coating operation values are 0 idle, 1 simulated home, 2 positioning, 3 short
@@ -260,14 +266,13 @@ build_and_debug_noice.bat
 ```
 
 It rebuilds, starts NoICE12, loads the STABS ELF, installs generated source and
-function mappings, selects source mode and adds the complete 58-variable proximity,
+function mappings, selects source mode and adds the complete 67-variable proximity,
 timing, manual-motor, motion-controller and Virtual UART diagnostic set. The
 authoritative list is `ESSENTIAL_WATCHES` in `tools\stabs_to_noice.py`.
 
 Before starting or playing a session containing the complete watch list, set
-NoICE **Refresh watches every** to 500 ms or disable timed refresh. The earlier
-30-item list was tested successfully at 250 ms; the coating/menu additions make
-the current list larger. A short interval can cause NoICE to refresh target
+NoICE **Refresh watches every** to 250 ms or disable timed refresh. A shorter
+interval can cause NoICE to refresh target
 memory while it is still adding watches and become unresponsive. If loading is
 still unreliable, disable timed refresh, play the file, wait for all watches to
 appear, and then restore the desired interval. Disable timed refresh during
@@ -409,17 +414,17 @@ m6811-elf-gcc 3.3.6 toolchain using -m68hc12 -mshort -fshort-double
 
 The tested bench mapping is PP0/PWM0 and PP1/PWM1 to an L6203, PA1 enable,
 PP3 enable feedback and PP4 GPIO prox input. Direction is inferred from the
-motor command. Current tested tuning is POSITION_KP_X100=250,
-SPEED_KP_GAIN=10, SPEED_KI_STEP_GAIN=10, INTEGRAL_LIMIT_X100=2500,
-MAX_SPEED_X100=300, REVERSAL_PAUSE_MS=100, 49-count travel, two cycles and
-95-percent maximum duty. The integral setting permits up to a +/-25 percentage
-point steady-state correction around feed-forward. The embedded and PC plots
-track closely and both return to zero without faults.
+motor command. Current tuning is POSITION_KP_X100=250, SPEED_KP_GAIN=5,
+SPEED_KI_STEP_GAIN=2, INTEGRAL_LIMIT_X100=1500, MAX_SPEED_X100=600,
+REVERSAL_PAUSE_MS=100, 98-count travel, two cycles and 95-percent maximum duty.
+The integral permits up to a +/-15 percentage-point correction. Both-edge
+position and direction-specific high/low timing compensation are implemented;
+this revision requires controlled hardware verification.
 
 The build scripts generate DWARF and STABS ELFs, S19, map files and generated
 NoICE source mappings. build_and_debug_noice.bat automatically launches NoICE,
-loads symbols/source mappings and the complete 58-variable watch list. Set
-timed watch refresh to 500 ms or disable it while loading. The BDM Virtual UART uses
+loads symbols/source mappings and the complete 67-variable watch list. Set
+timed watch refresh to 250 ms or disable it while loading. The BDM Virtual UART uses
 RAM 0x2000/0x2001 and emits the same 250 ms CSV schema as the PC build. Normal
 RAM begins at 0x2002. Do not replace the nonblocking logger with a blocking
 putchar implementation.
@@ -427,8 +432,10 @@ putchar implementation.
 First verify the ZIP's current build scripts, linker layout, constants and
 interfaces. Preserve the shared-code architecture. Before implementing any
 change, explain whether it belongs in shared control logic, the DG128 platform,
-the PC simulator or build/debug tooling. Prox period feedback is already
-invalidated on each motion start and requires two fresh rising edges. After
+the PC simulator or build/debug tooling. Prox speed feedback is invalidated on
+each motor start/reversal and requires a fresh complete rising-to-rising cycle.
+Both edges count position, while learned extend/retract high fractions normalize
+each high/low speed interval. After
 changes, build/run the PC tests, preserve NoICE source/watch automation and
 provide exact embedded test instructions.
 

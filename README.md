@@ -5,15 +5,15 @@ This is an intentionally staged trial project.
 ## Current verified build
 
 This project uses proximity feedback only.  The bench DG128 polls PP4 every
-1 ms and counts qualified rising edges. Direction is inferred from the signed
+1 ms and counts qualified rising and falling edges. Direction is inferred from the signed
 motor command. The portable state machine and cascaded position-P/speed-PI
 controller in `motion_sequence.c` are compiled without modification into both
 the embedded firmware and the PC simulation.
 
-The original embedded two-cycle path has been physically tested. The new
-embedded simulated-CAN coating path is implemented and passes C89 host syntax,
-linkage and PC behavioral tests, but still requires an actual HC12 build/map
-check and its first controlled bench run.
+The original two-cycle and simulated-CAN coating paths have run successfully
+on the physical DG128. The new both-edge/asymmetry-compensation revision passes
+C89 host linkage and PC behavioral tests but still requires its first HC12
+build/map review and controlled bench run.
 
 Build on Windows with MinGW GCC:
 
@@ -41,10 +41,12 @@ launcher scripts remain in place so existing commands continue to work.
 | `tools` | Build/debug tooling | NoICE mapping/watch generator and plotting tools |
 | `build` | Generated | Objects, executables, ELF/S19/map and NoICE session files |
 
-Current speed-loop test tuning is `SPEED_KP_GAIN=10`,
-`SPEED_KI_STEP_GAIN=10`, and `INTEGRAL_LIMIT_X100=2500`. The integral limit
-allows a correction of up to 25 PWM percentage points in either direction;
-the feed-forward value is a starting command, not a cap.
+Current speed-loop test tuning is `SPEED_KP_GAIN=5`,
+`SPEED_KI_STEP_GAIN=2`, and `INTEGRAL_LIMIT_X100=1500`. The integral limit
+allows a correction of up to 15 PWM percentage points in either direction;
+the feed-forward value is a starting command, not a cap. Both-edge speed error
+is divided by two before these gains are applied, preserving the physical
+response of the original rising-edge tuning.
 
 ## CAN point-move and coating-cycle simulation
 
@@ -113,7 +115,7 @@ The implemented `COATING_SETTINGS` values are suitable menu candidates:
 | Fast stroke count | Number of early passes in each group using fast speed |
 | Short fast/slow speeds | Percent for early/later short passes |
 | Long fast/slow speeds | Percent for early/later long passes |
-| Feedback counts/inch | Fixed-point calibration, presently 4.85 counts/inch |
+| Feedback counts/inch | Fixed-point both-edge calibration, presently 9.70 counts/inch |
 | Maximum motor speed | Prox counts/second x100 used to scale speed percent |
 
 Production additions worth considering are direction polarity, home-input
@@ -150,8 +152,10 @@ switch or a separately validated homing procedure.
 
 After simulated home, the scheduler fills `SimCanPositionTenths` and
 `SimCanSpeedPercent`, sets `SimCanCommandPending`, and the receiver converts the
-two bytes into `MotionMove_Start()`. Real PP4 feedback, speed PI control and the
-existing guarded PWM service perform the move. `SimCanMoving` clears at each
+two bytes into `MotionMove_Start()`. Real PP4 both-edge feedback, compensated
+speed PI control and the existing guarded PWM service perform the move. Each
+move requires a fresh complete prox cycle before speed becomes valid.
+`SimCanMoving` clears at each
 target and the scheduler waits 100 ms before issuing the next command.
 
 Useful status values are:
@@ -174,8 +178,8 @@ controller data.
 To run the embedded test:
 
 1. Build and load with `build_and_debug_noice.bat` using the UART target profile
-   if CSV is wanted. Use 500 ms watch refresh or disable timed refresh while the
-   58-watch session loads.
+   if CSV is wanted. Use 250 ms watch refresh or disable timed refresh while the
+   67-watch session loads.
 2. With the motor stopped, place the bench mechanism at the physical location
    that may safely be treated as retracted zero. Confirm `MotorOutputsEnabled=0`.
 3. Review/edit the `Coat*` settings. Ensure actuator and stroke lengths cannot
@@ -233,8 +237,11 @@ Watched variables for the first NoICE session:
 - `Tick1msCount` increases every 1 ms
 - `Tick10msCount` increases every 10 ms
 - `ProxInputRaw` and `ProxInputStable` show the PP4 GPIO state
-- `ProxEdgeCount` increases on each qualified rising edge at PP4
+- `ProxEdgeCount` increases on every qualified rising or falling edge at PP4
 - `ProxPeriodMs` contains milliseconds between rising edges
+- `ProxHighTimeMs` and `ProxLowTimeMs` show the unequal signal intervals
+- `ProxHighFractionExtendX1000` and `ProxHighFractionRetractX1000` show the
+  learned direction-specific high fraction; for example, 350 means 35.0%
 - `MotorOutputsEnabled` remains zero and does not control hardware yet
 
 The hardware vectors enter small fixed-memory assembly wrappers. Each wrapper
@@ -258,7 +265,8 @@ The planned DG128 sequence is:
 2. Verify reset, source stepping, globals, and normal variables beginning at
    RAM address 0x2002.
 3. Verify the 1 ms GPIO polling tick and derived 10 ms tick.
-4. Drive the sprocket externally and verify PP4 rising-edge measurements.
+4. Drive the sprocket externally and verify both PP4 edges, high/low timing and
+   the learned direction-specific duty fractions.
 5. Enable low-duty manual motor output from a watched command variable.
 6. Enable the automatic position/speed controller only after the above tests.
 
@@ -311,11 +319,10 @@ build_and_debug_noice.bat
 This rebuilds the project, starts NoICE12, and opens the generated
 `build\dg128_smoke_debug.noi` session.  That session loads the STABS ELF,
 installs the source mappings directly (without a nested `PLAY`), selects source
-mode, and adds the complete 58-variable diagnostic/menu watch list. The earlier
-30-item list loaded reliably at 250 ms. Because the coating additions expanded
-the list, use **Refresh watches every = 500 ms** or disable timed refresh while
-loading. NoICE may otherwise refresh target memory while it is still processing
-watch commands and become unresponsive.
+mode, and adds the complete 67-variable diagnostic/menu watch list. Use
+**Refresh watches every = 250 ms** or disable timed refresh while loading.
+NoICE may otherwise refresh target memory while it is still processing watch
+commands and become unresponsive.
 
 If the list still fails to load, turn timed watch refresh off, start or play the
 session, wait until all watches appear, and then restore the desired interval.
@@ -324,7 +331,7 @@ may provide better BDM stability. NoICE still refreshes watches after a step,
 breakpoint, register change, or a manual `WATCH` command.
 
 The build also creates `build\dg128_smoke_debug_watches.noi`. It contains the
-same 58 watches and can restore the Watch window without reloading the ELF.
+same 67 watches and can restore the Watch window without reloading the ELF.
 The generator derives both files from `ESSENTIAL_WATCHES` in
 `tools\stabs_to_noice.py`, so the lists cannot drift apart.
 
@@ -350,14 +357,25 @@ authoritative source for symbols and data types.
 
 The current bench unit connects the proximity signal to PP4.  This firmware
 intentionally treats PP4 as an ordinary GPIO input; it does not enable the
-KWP4 interrupt.  TC7 runs every 1 ms, qualifies a state change for two samples,
-and counts rising edges.  This matches the intended final approach for a prox
-input on PA6 or PB6.
+KWP4 interrupt. TC7 runs every 1 ms, qualifies a state change for two samples,
+and counts both rising and falling edges. This matches the intended final
+approach for a prox input on PA6 or PB6.
 
 Useful NoICE variables are `ProxInputRaw`, `ProxInputStable`, `ProxEdgeCount`,
-`ProxLastRiseMs`, `ProxPeriodMs`, `ProxPeriodValid`, and `ProxStopped`.
-`ProxStopped` becomes one after 2000 ms without another rising edge.  Motor
-outputs remain forced low until the guarded motor test is explicitly armed.
+`ProxLastEdgeMs`, `ProxLastRiseMs`, `ProxPeriodMs`, `ProxHighTimeMs`,
+`ProxLowTimeMs`, `ProxPeriodValid`, and `ProxStopped`. `ProxStopped` becomes
+one after 3000 ms without either edge. Motor outputs remain forced low until
+the guarded motor test is explicitly armed.
+
+The complete rising-to-rising period is the speed reference. On each complete
+cycle, the firmware learns the signal's high fraction separately for extend
+and retract. It then normalizes each individual high or low interval before
+calculating speed. For example, learned values of 350 and 650 make a 35/65
+waveform produce the same speed at both transitions instead of alternating
+fast and slow. The first sample initializes each direction; later samples use
+a 1/4 IIR update. Fractions outside 10%..90% are rejected as likely glitches.
+Every motor start or reversal invalidates speed until a fresh complete cycle
+has established valid timing; learned direction fractions are retained.
 
 ## Guarded motor-output test
 
@@ -387,19 +405,20 @@ an immediate emergency stop.
 ## Two-cycle extend/retract test
 
 `motion_sequence.c` is shared by the DG128 firmware and the PC test.  It uses
-the verified nine rising-edge pulses per sprocket revolution and treats the
-single-channel prox direction as the commanded motor direction.
+the verified nine tooth cycles, or 18 qualified edges, per sprocket revolution
+and treats the single-channel prox direction as the commanded motor direction.
 
 The staged test assumes the mechanism starts retracted at position zero.  It
-extends to 49 counts (about 10.1 inches with the recorded sprocket geometry),
+extends to 98 both-edge counts (about 10.1 inches with the recorded geometry),
 pauses 100 ms, returns to zero, and repeats for two cycles.  Maximum duty is
 95 percent, minimum approach duty is 10 percent, and each movement has a
 45-second timeout.
 
 The duty command now comes from a fixed-point cascaded controller shared by
 both builds.  The position P loop converts remaining prox counts into a signed
-speed command, limited to 3.00 counts/second.  The speed PI loop compares that
-command with speed calculated from the rising-edge period and produces signed
+speed command, limited to 6.00 both-edge counts/second (the same physical speed
+as the former 3.00 rising-edge counts/second). The speed PI loop compares that
+command with compensated high/low edge timing and produces signed
 PWM duty.  Feed-forward supplies most of the nominal duty, while the PI terms
 correct motor/load variation.  The integral is reset during stops and reversal
 pauses and is limited to prevent windup.  The prox stopped timeout is 3 seconds
@@ -408,9 +427,10 @@ so the verified 10-percent operating point remains valid.
 To start on hardware, set `MotionTestArm` to hexadecimal `C3` and run.  Useful
 watches are `MotionState`, `MotionCycle`, `MotionFault`,
 `MotionPositionCount`, `MotionTargetCount`, and `MotionCommandDuty`.  Controller
-diagnostics use x100 scaling: `MotionSpeedCommandX100`,
+diagnostics use x100 scaling in both-edge counts/second: `MotionSpeedCommandX100`,
 `MotionMeasuredSpeedX100`, `MotionSpeedErrorX100`, and
-`MotionSpeedIntegralX100`.  For example, 275 means 2.75 prox counts/second.
+`MotionSpeedIntegralX100`. For example, 550 means 5.50 both-edge counts/second,
+equivalent to 2.75 of the former rising-edge counts/second.
 State 5 means complete and state 6 means fault.  Clearing `MotionTestArm`
 aborts an active test.
 
@@ -472,7 +492,8 @@ ms,state,cycle,position,target,speed_cmd_x100,speed_fb_x100,duty,fault,dropped
 ```
 
 followed by a record every 250 ms.  `speed_cmd_x100` and `speed_fb_x100` use
-the controller's fixed-point scaling, so `300` means 3.00 prox counts/second.
+the controller's fixed-point scaling, so `600` means 6.00 both-edge
+counts/second, the same physical speed formerly represented by `300`.
 The `dropped` column and the `NoICE_VuartDroppedRecords` watch indicate whether
 the BDM terminal could not keep up.  If either is nonzero, increase
 `MOTION_TELEMETRY_PERIOD_MS` in `common\include\motion_csv.h` from 250 to 500 ms and

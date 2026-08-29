@@ -16,7 +16,7 @@ exit /b 1
 
 :LAUNCH_NOICE
 REM The generated session loads the STABS ELF, inlines the source mappings,
-REM and installs the complete 58-variable diagnostic/menu watch list. Set NoICE
-REM timed watch refresh to 500 ms or disable it before launching this session.
+REM and installs the complete 67-variable diagnostic/menu watch list. Set NoICE
+REM timed watch refresh to 250 ms or disable it before launching this session.
 start "" "%NOICE_EXE%" "%CD%\build\dg128_smoke_debug.noi"
 endlocal
