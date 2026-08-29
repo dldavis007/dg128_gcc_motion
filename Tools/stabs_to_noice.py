@@ -22,9 +22,18 @@ ESSENTIAL_WATCHES = [
     ("ProxInputRaw", "%U08"),
     ("ProxInputStable", "%U08"),
     ("ProxEdgeCount", "%U32"),
+    ("ProxLastEdgeMs", "%U32"),
     ("ProxLastRiseMs", "%U32"),
     ("ProxPeriodMs", "%U32"),
+    ("ProxLastIntervalMs", "%U32"),
+    ("ProxHighTimeMs", "%U32"),
+    ("ProxLowTimeMs", "%U32"),
     ("ProxPeriodValid", "%U08"),
+    ("ProxLastIntervalWasHigh", "%U08"),
+    ("ProxHighFractionExtendX1000", "%U16"),
+    ("ProxHighFractionRetractX1000", "%U16"),
+    ("ProxHighFractionExtendValid", "%U08"),
+    ("ProxHighFractionRetractValid", "%U08"),
     ("ProxStopped", "%U08"),
     ("Tick1msCount", "%U32"),
     ("Tick10msCount", "%U32"),
@@ -211,8 +220,8 @@ def main():
             reconnect_output_path = os.path.splitext(session_output_path)[0] + "_reconnect.noi"
 
         # The complete debugger-facing diagnostic/menu set is loaded at startup.
-        # The earlier 30-item list loaded at 250 ms. This expanded 58-item list
-        # should use 500 ms or have timed refresh disabled while it is played.
+        # A 250 ms refresh has loaded the expanded list successfully. Disable
+        # timed refresh while playing it if a particular NoICE session is unstable.
         session_commands = [
             "; Generated NoICE debug session - do not edit",
             "LOAD \"%s\"" % elf_path,
